@@ -1,0 +1,803 @@
+---
+title: "Spanish CDI III"
+author: "Virginia Marchman"
+date: "2023-05-30, updated 10/13/2023"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+```
+
+```{r}
+
+# This code produces the descriptives and norming plots and tables for the Spanish CDI III.  Data are presented in The MacArthur Inventario del Desarrollo de Habilidades Comunicativas III: A measure of language development in Spanish-speaking two- to four-year-olds. Donna Jackson-Maldonado, Margaret Friend, Virginia A. Marchman, Adriana Weisleder, Marta Rubio-Codina, Barbara Conboy, Alejandra Auza, and Philip Dale
+
+## This code uses GAMLSS, rather than gcrq, and therefore, supercedes code in GrowthCurves_VM.R
+
+
+```
+# Install packages
+
+```{r}
+
+install.packages("quantregGrowth")
+install.packages("ggplot2")
+install.packages("qrLMM")
+install.packages("wordbankr")
+install.packages("dplyr")
+install.packages("magrittr")
+install.packages("gamlss")
+
+library(wordbankr)
+library(quantregGrowth)
+library(ggplot2)
+library(utils)
+library(qrLMM)
+library(dplyr)
+library(magrittr)
+library(gamlss)
+library(ppcor)
+
+
+```
+# set working directory
+
+```{r}
+
+setwd("G:/Shared drives/Lang Learning Lab Management/Staff Personal/Active Staff Personal/VMarchman/CDI/Spanish CDI III/Data 2019/Analyses 2023")
+
+```
+# read data
+```{r}
+
+SCDI_III <- read.csv(file = "Span_CDIIII_finaldata.csv")
+
+SCDI_III <- as.data.frame(SCDI_III) %>%
+  mutate(
+      Sex = case_when(
+      gender == "1" ~ "M",
+      gender == "2" ~ "F")) %>%
+    filter(age <= 48)
+
+SCDI_III <- SCDI_III %>%
+  mutate(
+    momed = case_when(
+      momed == 1 ~ "Middle School or Less",
+      momed == 2 ~ "Some High School",
+      momed == 3 ~ "Completed High School",
+      momed == 4 ~ "More than High School")
+  )
+
+
+SCDI_III <- SCDI_III %>%
+  mutate(
+    momed_2 = case_when(
+      momed == "Middle School or Less" ~ "Less than High School",
+      momed == "Some High School" ~ "Less than High School",
+      momed == "Completed High School" ~ "High School or more",
+      momed == "More than High School" ~ "High School or more")
+  )
+
+head(SCDI_III)
+
+```
+
+# Descriptives of n for age, sex and momed, Table 3
+```{r}
+
+SCDI_III_desc_agegroup <-
+  table(SCDI_III$agegroup3)
+
+SCDI_III_desc_agegroup
+
+SCDI_III_desc_sex <-
+  table(SCDI_III$Sex)
+
+SCDI_III_desc_sex
+
+round(prop.table(SCDI_III_desc_sex)*100, digits = 1)
+
+SCDI_III_agegroup_sex <-
+  table(SCDI_III$agegroup3, SCDI_III$Sex)
+
+SCDI_III_agegroup_sex
+
+round(prop.table(SCDI_III_agegroup_sex, 1)*100, digits = 1)
+
+# Maternal education
+
+SCDI_III_momed <- table(SCDI_III$momed)
+
+SCDI_III_momed
+
+round(prop.table(SCDI_III_momed)*100, digits = 1)
+
+SCDI_III_agegroup_momed <-
+  table(SCDI_III$agegroup3, SCDI_III$momed)
+
+SCDI_III_agegroup_momed
+
+round(prop.table(SCDI_III_agegroup_momed, 1)*100, digits = 1)
+
+```
+#Descriptives of vocab and sentence complexity - Table 4
+```{r}
+
+SCDI_III %>%
+  dplyr::summarize(
+            n_vocab = n(),
+            mean_vocab = round(mean(TOTALWORDS, na.rm = T), 1),
+            sd_vocab = round(sd(TOTALWORDS, na.rm = T), 1),
+            mean_complex = round(mean(complex_15, na.rm = T), 1),
+            sd_complex = round(sd(complex_15, na.rm = T), 1))
+
+SCDI_III %>% group_by(Sex) %>%
+  summarise(mean_vocab = round(mean(TOTALWORDS, na.rm = T), 1),
+           sd_vocab = round(sd(TOTALWORDS, na.rm = T), 1),
+           mean_complex = round(mean(complex_15, na.rm = T), 1),
+           sd_complex = round(sd(complex_15, na.rm = T), 1))
+
+SCDI_III %>% group_by(agegroup3) %>%
+  summarise(mean_vocab = round(mean(TOTALWORDS, na.rm = T), 1),
+            sd_vocab = round(sd(TOTALWORDS, na.rm = T), 1),
+            mean_complex = round(mean(complex_15, na.rm = T), 1),
+            sd_complex = round(sd(complex_15, na.rm = T), 1))
+
+
+SCDI_III %>% group_by(Sex, agegroup3) %>%
+  summarise(mean_vocab = round(mean(TOTALWORDS, na.rm = T), 1),
+            sd_vocab = round(sd(TOTALWORDS, na.rm = T), 1),
+            mean_complex = round(mean(complex_15, na.rm = T), 1),
+            sd_complex = round(sd(complex_15, na.rm = T), 1))
+
+
+```
+
+#Run GAMLSS models for norming tables
+## Vocabulary: Words produced-both sexes combined
+```{r}
+
+# Note GAMLSS models are specifically using the "beta" distribution family, which means they are bounded by 0 and 1 (like a logistic)
+
+#The function doesn't like 0 or 1, so change those extreme scores to 0.001 and .999 so that we can keep in all kids
+
+SCDI_III_vocab <- dplyr::select(SCDI_III, TOTALWORDS, age, Sex, momed, momed_2)
+
+SCDI_III_vocab <- SCDI_III_vocab %>%
+  mutate(prop_produced = as.numeric(TOTALWORDS/100),
+         age = as.numeric(age)) %>%
+  mutate(prop_produced = case_when(prop_produced == 0 ~ 0.001, 
+                            prop_produced == 1 ~ 0.999,
+                            TRUE ~ prop_produced))
+ 
+gam_SCDI_III_vocab <- gamlss(prop_produced ~ pb(age, lambda = 10000), 
+                 sigma.formula = ~ pb(age, lambda = 10000),
+                 family = BE, 
+                 data = SCDI_III_vocab)
+
+summary(gam_SCDI_III_vocab)
+
+gam_SCDI_III_vocab_sex <- gamlss(prop_produced ~ pb(age, lambda = 10000) + Sex, 
+                 sigma.formula = ~ pb(age),
+                 family = BE, 
+                 data = na.omit(SCDI_III_vocab))
+
+summary(gam_SCDI_III_vocab_sex)
+
+
+gam_SCDI_III_vocab_sex_int <- gamlss(prop_produced ~ pb(age, lambda = 10000) * Sex, 
+                 sigma.formula = ~ pb(age),
+                 family = BE, 
+                 data = na.omit(SCDI_III_vocab))
+
+summary(gam_SCDI_III_vocab_sex_int)
+
+LR.test(gam_SCDI_III_vocab_sex, gam_SCDI_III_vocab_sex_int)
+
+```
+
+### centiles for plot - both sexes combined
+
+```{r}
+
+quints_vocab <- centiles.pred(gam_SCDI_III_vocab, cent = c(90, 75, 50, 25, 10), 
+                       xname = "age", xvalues = 30:48)  %>%
+ tibble() %>%
+ tidyr::pivot_longer(2:6, names_to = "percentile", values_to = "pred")
+
+ggplot(quints_vocab, aes(x = age, y = percentile)) + 
+  geom_line(data = quints_vocab, size = 1.3, aes(x = x, y = pred * 100, linetype = percentile)) +
+  theme_bw() +
+  theme(legend.position = "right") +
+  theme(panel.grid = element_blank(),
+        panel.grid.major.y = element_line(colour = "grey50")) +
+  scale_linetype_manual(values = c("twodash","dotdash","solid", "dashed", "dotted"), 
+                        breaks = c(90, 75, 50, 25, 10), labels = c("90th", "75th", "50th", "25th", "10th")) +
+  scale_x_continuous(breaks=seq(30,48,1)) +
+  scale_y_continuous(limits = c(0, 100), breaks = seq(0,100,20)) +
+  coord_cartesian(ylim = c(0, 100)) +
+  labs(
+    x = "Age (months)", 
+    y = "Fitted \n words \n produced",
+    linetype = "Percentile") +
+  theme(axis.title.y = element_text(angle = 0, vjust = 0.5, size = 16)) +
+  theme(legend.text = element_text(size = 14))+
+  theme(legend.title = element_text(size = 16))+
+  theme(text = element_text(size = 18))
+
+ggsave("G:/Shared drives/Lang Learning Lab Management/Staff Personal/Active Staff Personal/VMarchman/CDI/Spanish CDI III/Data 2019/Analyses 2023/GAMLSS_vocab_both.jpg", height = 8, width = 11, units = "in", dpi = 300)
+
+
+```
+
+### full percentiles - both sexes combined
+
+```{r}
+percentiles_SCDI_III_vocab <- centiles.pred(gam_SCDI_III_vocab, cent = c(5,10,15,20,25,30,35,40,45,50,55,60,65,70,75,80,85,90,95,99),
+                       xname = "age", xvalues = 30:48) %>%
+  dplyr::tibble() %>%
+  dplyr::rename(age = x) %>%
+  dplyr::mutate(across(`5`:`99`, ~ round(.*100)))
+
+percentiles_vocab <- as.data.frame(t(percentiles_SCDI_III_vocab))
+
+write.csv(percentiles_vocab, "G:/Shared drives/Lang Learning Lab Management/Staff Personal/Active Staff Personal/VMarchman/CDI/Spanish CDI III/Data 2019/Analyses 2023/ptiles_vocab_both.csv")
+
+```
+##Vocabulary: Words produced - girls only
+```{r}
+
+# Note GAMLSS models are specifically using the "beta" distribution family, which means they are bounded by 0 and 1 (like a logistic)
+
+#The function doesn't like 0 or 1, so change those extreme scores to 0.001 and .999 so that we can keep in all kids
+
+#Need to select only the variables that you need, otherwise gamlss doesn't like missing values
+
+SCDI_III_vocab <- dplyr::select(SCDI_III, TOTALWORDS, age, Sex, momed, momed_2)
+
+SCDI_III_vocab_girls <- SCDI_III_vocab %>%
+  mutate(prop_produced = as.numeric(TOTALWORDS/100),
+         age = as.numeric(age)) %>%
+  mutate(prop_produced = case_when(prop_produced == 0 ~ 0.001, 
+                            prop_produced == 1 ~ 0.999,
+                            TRUE ~ prop_produced)) %>%
+  filter(Sex == "F")
+ 
+gam_SCDI_III_vocab_girls <- gamlss(prop_produced ~ pb(age, lambda = 10000), 
+                 sigma.formula = ~ pb(age, lambda = 10000),
+                 family = BE, 
+                 data = na.omit(SCDI_III_vocab_girls))
+
+
+summary(gam_SCDI_III_vocab_girls)
+```
+### centiles for plot - girls only
+
+```{r}
+
+quints_vocab_girls <- centiles.pred(gam_SCDI_III_vocab_girls, cent = c(90, 75, 50, 25, 10), 
+                       xname = "age", xvalues = 30:48)  %>%
+ tibble() %>%
+ tidyr::pivot_longer(2:6, names_to = "percentile", values_to = "pred")
+
+ggplot(quints_vocab_girls, aes(x = age, y = percentile)) + 
+  geom_line(data = quints_vocab_girls, size = 1.3, aes(x = x, y = pred * 100, linetype = percentile)) +
+  theme_bw() +
+  theme(legend.position = "right") +
+  theme(panel.grid = element_blank(),
+        panel.grid.major.y = element_line(colour = "grey50")) +
+  scale_linetype_manual(values = c("twodash","dotdash","solid", "dashed", "dotted"), 
+                        breaks = c(90, 75, 50, 25, 10), labels = c("90th", "75th", "50th", "25th", "10th")) +
+  scale_x_continuous(breaks=seq(30,48,1)) +
+  scale_y_continuous(limits = c(0, 100), breaks = seq(0,100,20)) +
+  coord_cartesian(ylim = c(0, 100)) +
+  labs(
+    x = "Age (months)", 
+    y = "Fitted \n words \n produced",
+    linetype = "Percentile") +
+   theme(axis.title.y = element_text(angle = 0, vjust = 0.5, size = 16)) +
+  theme(legend.text = element_text(size = 14))+
+  theme(legend.title = element_text(size = 16))+
+  theme(text = element_text(size = 18))
+
+ggsave("G:/Shared drives/Lang Learning Lab Management/Staff Personal/Active Staff Personal/VMarchman/CDI/Spanish CDI III/Data 2019/Analyses 2023/GAMLSS_vocab_girls.jpg", height = 8, width = 11, units = "in", dpi = 300)
+
+```
+
+### full percentiles - girls only 
+
+```{r}
+percentiles_SCDI_III_vocab_girls <- centiles.pred(gam_SCDI_III_vocab_girls, cent = c(5,10,15,20,25,30,35,40,45,50,55,60,65,70,75,80,85,90,95,99),
+                       xname = "age", xvalues = 30:48) %>%
+  dplyr::tibble() %>%
+  dplyr::rename(age = x) %>%
+  dplyr::mutate(across(`5`:`99`, ~ round(.*100)))
+
+percentiles_vocab_girls <- as.data.frame(t(percentiles_SCDI_III_vocab_girls))
+
+write.csv(percentiles_vocab_girls, "G:/Shared drives/Lang Learning Lab Management/Staff Personal/Active Staff Personal/VMarchman/CDI/Spanish CDI III/Data 2019/Analyses 2023/ptiles_vocab_girls.csv")
+
+```
+##Vocabulary: Words produced - boys only
+```{r}
+
+# Note GAMLSS models are specifically using the "beta" distribution family, which means they are bounded by 0 and 1 (like a logistic)
+
+#The function doesn't like 0 or 1, so change those extreme scores to 0.001 and .999 so that we can keep in all kids
+
+#Need to select only the variables that you need, otherwise gamlss doesn't like missing values
+
+SCDI_III_vocab_boys <- dplyr::select(SCDI_III, TOTALWORDS, age, Sex, momed, momed_2)
+
+SCDI_III_vocab_boys <- SCDI_III_vocab %>%
+  mutate(prop_produced = as.numeric(TOTALWORDS/100),
+         age = as.numeric(age)) %>%
+  mutate(prop_produced = case_when(prop_produced == 0 ~ 0.001, 
+                            prop_produced == 1 ~ 0.999,
+                            TRUE ~ prop_produced)) %>%
+  filter(Sex == "M")
+ 
+gam_SCDI_III_vocab_boys <- gamlss(prop_produced ~ pb(age, lambda = 10000), 
+                 sigma.formula = ~ pb(age, lambda = 10000),
+                 family = BE, 
+                 data = SCDI_III_vocab_boys)
+
+
+summary(gam_SCDI_III_vocab_boys)
+```
+### centiles for plot - boys only
+
+```{r}
+
+quints_vocab_boys <- centiles.pred(gam_SCDI_III_vocab_boys, cent = c(90, 75, 50, 25, 10), 
+                       xname = "age", xvalues = 30:48)  %>%
+ tibble() %>%
+ tidyr::pivot_longer(2:6, names_to = "percentile", values_to = "pred")
+
+ggplot(quints_vocab_boys, aes(x = age, y = percentile)) + 
+  geom_line(data = quints_vocab_boys, size = 1.3, aes(x = x, y = pred * 100, linetype = percentile)) +
+  theme_bw() +
+  theme(legend.position = "right") +
+  theme(panel.grid = element_blank(),
+        panel.grid.major.y = element_line(colour = "grey50")) +
+  scale_linetype_manual(values = c("twodash","dotdash","solid", "dashed", "dotted"), 
+                        breaks = c(90, 75, 50, 25, 10), labels = c("90th", "75th", "50th", "25th", "10th")) +
+  scale_x_continuous(breaks=seq(30,48,1)) +
+  scale_y_continuous(limits = c(0, 100), breaks = seq(0,100,20)) +
+  coord_cartesian(ylim = c(0, 100)) +
+  labs(
+    x = "Age (months)", 
+    y = "Fitted \n words \n produced",
+    linetype = "Percentile") +
+   theme(axis.title.y = element_text(angle = 0, vjust = 0.5, size = 16)) +
+  theme(legend.text = element_text(size = 14))+
+  theme(legend.title = element_text(size = 16))+
+  theme(text = element_text(size = 18))
+
+ggsave("G:/Shared drives/Lang Learning Lab Management/Staff Personal/Active Staff Personal/VMarchman/CDI/Spanish CDI III/Data 2019/Analyses 2023/GAMLSS_vocab_boys.jpg", height = 8, width = 11, units = "in", dpi = 300)
+
+```
+### full percentiles - boys only 
+```{r}
+percentiles_SCDI_III_vocab_boys <- centiles.pred(gam_SCDI_III_vocab_boys, cent = c(5,10,15,20,25,30,35,40,45,50,55,60,65,70,75,80,85,90,95,99),
+                       xname = "age", xvalues = 30:48) %>%
+  dplyr::tibble() %>%
+  dplyr::rename(age = x) %>%
+  dplyr::mutate(across(`5`:`99`, ~ round(.*100)))
+
+percentiles_vocab_boys <- as.data.frame(t(percentiles_SCDI_III_vocab_boys))
+
+write.csv(percentiles_vocab_boys, "G:/Shared drives/Lang Learning Lab Management/Staff Personal/Active Staff Personal/VMarchman/CDI/Spanish CDI III/Data 2019/Analyses 2023/ptiles_vocab_boys.csv")
+
+```
+
+##Complexity Score (out of 15 possible) - see SPSS syntax for items included - both sexes combined
+```{r}
+
+# Note GAMLSS models are specifically using the "beta" distribution family, which means they are bounded by 0 and 1 (like a logistic)
+
+# GAMLSS Sketch for SCDI_III Complexity
+
+#The function doesn't like 0 or 1, so change those extreme scores to 0.001 and .999 so that we can keep in all kids
+
+#Need to select only the variables that you need, otherwise gamlss doesn't like missing values
+
+SCDI_III %>% count(complex_15)
+
+SCDI_III_complex15 <- dplyr::select(SCDI_III, complex_15, age, Sex, momed, momed_2) %>%
+  filter(complex_15 != "NA")
+
+SCDI_III_complex15 <- SCDI_III_complex15 %>%
+  mutate(prop_complex15 = as.numeric(complex_15/15),
+         age = as.numeric(age)) %>%
+  mutate(prop_complex15 = case_when(prop_complex15 == 0 ~ 0.001, 
+                             prop_complex15 == 1 ~ 0.999,
+                             TRUE ~ prop_complex15))
+ 
+gam_SCDI_III_complex15 <- gamlss(prop_complex15 ~ pb(age, lambda = 10000), 
+                 sigma.formula = ~ pb(age, lambda = 10000),
+                 family = BE, 
+                 data = na.omit(SCDI_III_complex15))
+
+
+summary(gam_SCDI_III_complex15)
+
+gam_SCDI_III_complex15_sex <- gamlss(prop_complex15 ~ pb(age, lambda = 10000) + Sex, 
+                 sigma.formula = ~ pb(age, lambda = 10000),
+                 family = BE, 
+                 data = na.omit(SCDI_III_complex15))
+
+
+summary(gam_SCDI_III_complex15_sex)
+
+gam_SCDI_III_complex15_sex_int <- gamlss(prop_complex15 ~ pb(age, lambda = 10000) * Sex, 
+                 sigma.formula = ~ pb(age, lambda = 10000),
+                 family = BE, 
+                 data = na.omit(SCDI_III_complex15))
+
+
+summary(gam_SCDI_III_complex15_sex_int)
+
+LR.test(gam_SCDI_III_complex15_sex, gam_SCDI_III_complex15_sex_int)
+
+
+```
+###Complexity centiles for plot - both sexes combined
+
+```{r}
+quints_complex15 <- centiles.pred(gam_SCDI_III_complex15, cent = c(90, 75, 50, 25, 10), 
+                       xname = "age", xvalues = 30:48)  %>%
+ tibble() %>%
+ tidyr::pivot_longer(2:6, names_to = "percentile", values_to = "pred")
+
+ggplot(quints_complex15, aes(x = age, y = percentile)) + 
+  geom_line(data = quints_complex15, size = 1.3, aes(x = x, y = pred * 15, linetype = percentile)) +
+  theme_bw() +
+  theme(legend.position = "right") +
+  theme(panel.grid = element_blank(),
+        panel.grid.major.y = element_line(colour = "grey50")) +
+  scale_linetype_manual(values = c("twodash","dotdash","solid", "dashed", "dotted"), 
+                        breaks = c(90, 75, 50, 25, 10), labels = c("90th", "75th", "50th", "25th", "10th")) +
+  scale_x_continuous(breaks=seq(30,48,1)) +
+  scale_y_continuous(limits = c(0, 15), breaks = seq(0,15,5)) +
+  coord_cartesian(ylim = c(0, 15)) +
+  labs(
+    x = "Age (months)", 
+    y = "Fitted \n complexity \n score",
+    linetype = "Percentile") +
+  theme(axis.title.y = element_text(angle = 0, vjust = 0.5, size = 16)) +
+  theme(legend.text = element_text(size = 14))+
+  theme(legend.title = element_text(size = 16))+
+  theme(text = element_text(size = 18))
+
+ggsave("G:/Shared drives/Lang Learning Lab Management/Staff Personal/Active Staff Personal/VMarchman/CDI/Spanish CDI III/Data 2019/Analyses 2023/GAMLSS_complex_both.jpg", height = 8, width = 11, units = "in", dpi = 300)
+
+```
+
+###Full percentiles - complexity both sexes combined
+
+```{r}
+percentiles_SCDI_III_complex15 <- centiles.pred(gam_SCDI_III_complex15, cent = c(5,10,15,20,25,30,35,40,45,50,55,60,65,70,75,80,85,90,95,99),
+                       xname = "age", xvalues = 30:48) %>%
+  dplyr::tibble() %>%
+  dplyr::rename(age = x) %>%
+  dplyr::mutate(across(`5`:`99`, ~ round(.*15)))
+
+percentiles_complex15 <- as.data.frame(t(percentiles_SCDI_III_complex15))
+
+write.csv(percentiles_complex15, "G:/Shared drives/Lang Learning Lab Management/Staff Personal/Active Staff Personal/VMarchman/CDI/Spanish CDI III/Data 2019/Analyses 2023/ptiles_complex15_both.csv")
+
+```
+##Complexity Score (out of 15 possible) - see SPSS syntax for items included - girls only
+```{r}
+
+# Note GAMLSS models are specifically using the "beta" distribution family, which means they are bounded by 0 and 1 (like a logistic)
+
+# GAMLSS Sketch for SCDI_III Complexity-girls
+
+#The function doesn't like 0 or 1, so change those extreme scores to 0.001 and .999 so that we can keep in all kids
+
+SCDI_III_complex15_girls <- SCDI_III_complex15 %>%
+  mutate(prop_complex15 = as.numeric(complex_15/15),
+         age = as.numeric(age)) %>%
+  mutate(prop_complex15 = case_when(prop_complex15 == 0 ~ 0.001, 
+                             prop_complex15 == 1 ~ 0.999,
+                             TRUE ~ prop_complex15)) %>%
+  filter(Sex == "F")
+ 
+gam_SCDI_III_complex15_girls <- gamlss(prop_complex15 ~ pbm(age, lambda = 10000), 
+                 sigma.formula = ~ pbm(age, lambda = 10000),
+                 family = BE, 
+                 data = na.omit(SCDI_III_complex15_girls))
+
+```
+###Complexity centiles for plot - girls only
+
+```{r}
+quints_complex15_girls <- centiles.pred(gam_SCDI_III_complex15_girls, cent = c(90, 75, 50, 25, 10), 
+                       xname = "age", xvalues = 30:48)  %>%
+ tibble() %>%
+ tidyr::pivot_longer(2:6, names_to = "percentile", values_to = "pred")
+
+ggplot(quints_complex15_girls, aes(x = age, y = percentile)) + 
+  geom_line(data = quints_complex15_girls, size = 1.3, aes(x = x, y = pred * 15, linetype = percentile)) +
+  theme_bw() +
+  theme(legend.position = "right") +
+  theme(panel.grid = element_blank(),
+        panel.grid.major.y = element_line(colour = "grey50")) +
+  scale_linetype_manual(values = c("twodash","dotdash","solid", "dashed", "dotted"), 
+                        breaks = c(90, 75, 50, 25, 10), labels = c("90th", "75th", "50th", "25th", "10th")) +
+  scale_x_continuous(breaks=seq(30,48,1)) +
+  scale_y_continuous(limits = c(0, 15), breaks = seq(0,15,5)) +
+  coord_cartesian(ylim = c(0, 15)) +
+  labs(
+    x = "Age (months)", 
+    y = "Fitted \n complexity \n score",
+    linetype = "Percentile") +
+   theme(axis.title.y = element_text(angle = 0, vjust = 0.5, size = 16)) +
+  theme(legend.text = element_text(size = 14))+
+  theme(legend.title = element_text(size = 16))+
+  theme(text = element_text(size = 18))
+
+ggsave("G:/Shared drives/Lang Learning Lab Management/Staff Personal/Active Staff Personal/VMarchman/CDI/Spanish CDI III/Data 2019/Analyses 2023/GAMLSS_complex_girls.jpg", height = 8, width = 11, units = "in", dpi = 300)
+
+```
+
+###Full percentiles - complexity girls only
+
+```{r}
+percentiles_SCDI_III_complex15_girls <- centiles.pred(gam_SCDI_III_complex15_girls, cent = c(5,10,15,20,25,30,35,40,45,50,55,60,65,70,75,80,85,90,95,99),
+                       xname = "age", xvalues = 30:48) %>%
+  dplyr::tibble() %>%
+  dplyr::rename(age = x) %>%
+  dplyr::mutate(across(`5`:`99`, ~ round(.*15)))
+
+percentiles_complex15_girls <- as.data.frame(t(percentiles_SCDI_III_complex15_girls))
+
+write.csv(percentiles_complex15_girls, "G:/Shared drives/Lang Learning Lab Management/Staff Personal/Active Staff Personal/VMarchman/CDI/Spanish CDI III/Data 2019/Analyses 2023/ptiles_complex15_girls.csv")
+
+```
+
+##Complexity Score (out of 15 possible) - see SPSS syntax for items included - boys only
+```{r}
+
+# Note GAMLSS models are specifically using the "beta" distribution family, which means they are bounded by 0 and 1 (like a logistic)
+
+# GAMLSS Sketch for SCDI_III Complexity-boys
+
+#The function doesn't like 0 or 1, so change those extreme scores to 0.001 and .999 so that we can keep in all kids
+
+SCDI_III_complex15_boys <- SCDI_III_complex15 %>%
+  mutate(prop_complex15 = as.numeric(complex_15/15),
+         age = as.numeric(age)) %>%
+  mutate(prop_complex15 = case_when(prop_complex15 == 0 ~ 0.001, 
+                             prop_complex15 == 1 ~ 0.999,
+                             TRUE ~ prop_complex15)) %>%
+  filter(Sex == "M")
+ 
+gam_SCDI_III_complex15_boys <- gamlss(prop_complex15 ~ pbm(age, lambda = 10000), 
+                 sigma.formula = ~ pbm(age, lambda = 10000),
+                 family = BE, 
+                 data = na.omit(SCDI_III_complex15_boys))
+
+```
+###Complexity centiles for plot - boys only
+
+```{r}
+quints_complex15_boys <- centiles.pred(gam_SCDI_III_complex15_boys, cent = c(90, 75, 50, 25, 10), 
+                       xname = "age", xvalues = 30:48)  %>%
+ tibble() %>%
+ tidyr::pivot_longer(2:6, names_to = "percentile", values_to = "pred")
+
+ggplot(quints_complex15_boys, aes(x = age, y = percentile)) + 
+  geom_line(data = quints_complex15_boys, size = 1.3, aes(x = x, y = pred * 15, linetype = percentile)) +
+  theme_bw() +
+  theme(legend.position = "right") +
+  theme(panel.grid = element_blank(),
+        panel.grid.major.y = element_line(colour = "grey50")) +
+  scale_linetype_manual(values = c("twodash","dotdash","solid", "dashed", "dotted"), 
+                        breaks = c(90, 75, 50, 25, 10), labels = c("90th", "75th", "50th", "25th", "10th")) +
+  scale_x_continuous(breaks=seq(30,48,1)) +
+  scale_y_continuous(limits = c(0, 15), breaks = seq(0,15,5)) +
+  coord_cartesian(ylim = c(0, 15)) +
+  labs(
+    x = "Age (months)", 
+    y = "Fitted \n complexity \n score",
+    linetype = "Percentile") +
+   theme(axis.title.y = element_text(angle = 0, vjust = 0.5, size = 16)) +
+  theme(legend.text = element_text(size = 14))+
+  theme(legend.title = element_text(size = 16))+
+  theme(text = element_text(size = 18))
+
+ggsave("G:/Shared drives/Lang Learning Lab Management/Staff Personal/Active Staff Personal/VMarchman/CDI/Spanish CDI III/Data 2019/Analyses 2023/GAMLSS_complex_boys.jpg", height = 8, width = 11, units = "in", dpi = 300)
+
+```
+
+###Full percentiles - complexity boys only
+
+```{r}
+percentiles_SCDI_III_complex15_boys <- centiles.pred(gam_SCDI_III_complex15_boys, cent = c(5,10,15,20,25,30,35,40,45,50,55,60,65,70,75,80,85,90,95,99),
+                       xname = "age", xvalues = 30:48) %>%
+  dplyr::tibble() %>%
+  dplyr::rename(age = x) %>%
+  dplyr::mutate(across(`5`:`99`, ~ round(.*15)))
+
+percentiles_complex15_boys <- as.data.frame(t(percentiles_SCDI_III_complex15_boys))
+
+write.csv(percentiles_complex15_boys, "G:/Shared drives/Lang Learning Lab Management/Staff Personal/Active Staff Personal/VMarchman/CDI/Spanish CDI III/Data 2019/Analyses 2023/ptiles_complex15_boys.csv")
+
+```
+# Intercorrelations between vocabulary and grammatical complexity
+```{r}
+
+SCDI_III_corr <- (filter(SCDI_III, SCDI_III$complex_15 != "NA"))
+  
+cor(SCDI_III_corr$total, SCDI_III_corr$complex_15, method="pearson")
+
+pcor.test(SCDI_III_corr$total, SCDI_III_corr$complex_15, SCDI_III_corr$age)
+
+```
+# Socioeconomic status-Descriptives
+```{r}
+
+SCDI_III %>% group_by(momed_2) %>%
+  summarize(n = n(), na.rm = T,
+            mean_vocab = round(mean(TOTALWORDS, na.rm = T), 1),
+            sd_vocab = round(sd(TOTALWORDS, na.rm = T), 1),
+            mean_complex = round(mean(complex_15, na.rm = T), 1),
+            sd_complex = round(sd(complex_15, na.rm = T), 1))
+
+```
+## Vocabulary x momed models
+```{r}
+
+SCDI_III_vocab_momed2 <- dplyr::select(SCDI_III, TOTALWORDS, age, Sex, momed, momed_2)
+
+SCDI_III_vocab_momed2 <- SCDI_III_vocab_momed2 %>%
+  mutate(prop_produced = as.numeric(TOTALWORDS/100),
+         age = as.numeric(age)) %>%
+  mutate(prop_produced = case_when(prop_produced == 0 ~ 0.001, 
+                            prop_produced == 1 ~ 0.999,
+                            TRUE ~ prop_produced))
+
+gam_SCDI_III_vocab_momed2 <- gamlss(prop_produced ~ pb(age, lambda = 10000) + momed_2, 
+                 sigma.formula = ~ pb(age),
+                 family = BE, 
+                 data = na.omit(SCDI_III_vocab_momed2))
+
+summary(gam_SCDI_III_vocab_momed2)
+
+gam_SCDI_III_vocab_momed2_int <- gamlss(prop_produced ~ pb(age, lambda = 10000) * momed_2, 
+                 sigma.formula = ~ pb(age),
+                 family = BE, 
+                 data = na.omit(SCDI_III_vocab_momed2))
+
+summary(gam_SCDI_III_vocab_momed2_int)
+
+LR.test(gam_SCDI_III_vocab_momed2, gam_SCDI_III_vocab_momed2_int)
+
+```
+##Vocabulary x momed plot
+```{r}
+
+SCDI_III_vocab_momed2$fitted <- (predict(gam_SCDI_III_vocab_momed2, type = "response") * 100)
+
+ggplot(SCDI_III_vocab_momed2, aes(x = age, y = fitted)) + 
+  geom_line(data = SCDI_III_vocab_momed2, size = 1.3, aes(x = age, y = fitted, linetype = momed_2)) +
+  theme_bw() +
+  theme(legend.position = "right") +
+  theme(panel.grid = element_blank(),
+        panel.grid.major.y = element_line(colour = "grey50")) +
+  scale_linetype_manual(values = c("solid", "twodash"), labels = c("High School or more", "Less than High School")) +
+  scale_x_continuous(breaks=seq(30,48,1)) +
+  scale_y_continuous(limits = c(0, 100), breaks = seq(0,100,15)) +
+  coord_cartesian(ylim = c(0, 100)) +
+  labs(
+    x = "Age (months)", 
+    y = "Fitted\n Vocabulary\n Size",
+    linetype = "Maternal \nEducation") +
+  theme(axis.title.y = element_text(angle = 0, vjust = 0.5, size = 16)) +
+  theme(legend.text = element_text(size = 16))+
+  theme(legend.title = element_text(size = 18))+
+  theme(text = element_text(size = 18))
+
+ggsave("G:/Shared drives/Lang Learning Lab Management/Staff Personal/Active Staff Personal/VMarchman/CDI/Spanish CDI III/Data 2019/Analyses 2023/GAMLSS_vocabulary_momed.jpg", height = 8, width = 11, units = "in", dpi = 300)
+
+```
+##Complexity x momed models
+```{r}
+
+SCDI_III_complex15 <- dplyr::select(SCDI_III, complex_15, age, Sex, momed, momed_2) %>%
+  filter(complex_15 != "NA")
+
+SCDI_III_complex15 <- SCDI_III_complex15 %>%
+  mutate(prop_complex15 = as.numeric(complex_15/15),
+         age = as.numeric(age)) %>%
+  mutate(prop_complex15 = case_when(prop_complex15 == 0 ~ 0.001, 
+                             prop_complex15 == 1 ~ 0.999,
+                             TRUE ~ prop_complex15))
+
+gam_SCDI_III_complex_age <- gamlss(prop_complex15 ~ pb(age, lambda = 10000), 
+                 sigma.formula = ~ pb(age),
+                 family = BE, 
+                 data = na.omit(SCDI_III_complex15))
+
+summary(gam_SCDI_III_complex_age)
+
+gam_SCDI_III_complex_momed2 <- gamlss(prop_complex15 ~ pb(age, lambda = 10000) + momed_2, 
+                 sigma.formula = ~ pb(age),
+                 family = BE, 
+                 data = na.omit(SCDI_III_complex15))
+
+summary(gam_SCDI_III_complex_momed2)
+
+gam_SCDI_III_complex_momed2_int <- gamlss(prop_complex15 ~ pb(age, lambda = 10000) * momed_2, 
+                 sigma.formula = ~ pb(age),
+                 family = BE, 
+                 data = na.omit(SCDI_III_complex15))
+
+summary(gam_SCDI_III_complex_momed2_int)
+
+LR.test(gam_SCDI_III_complex_age, gam_SCDI_III_complex_momed2)
+LR.test(gam_SCDI_III_complex_momed2, gam_SCDI_III_complex_momed2_int)
+
+```
+##Complexity x momed plot
+```{r}
+
+SCDI_III_complex15$fitted <- (predict(gam_SCDI_III_complex_momed2, type = "response") * 15)
+
+ggplot(SCDI_III_complex15, aes(x = age, y = fitted)) + 
+  geom_line(data = SCDI_III_complex15, size = 1.3, aes(x = age, y = fitted, linetype = momed_2)) +
+  theme_bw() +
+  theme(legend.position = "right") +
+  theme(panel.grid = element_blank(),
+        panel.grid.major.y = element_line(colour = "grey50")) +
+  scale_linetype_manual(values = c("solid", "twodash"), labels = c("High School or more", "Less than High School")) +
+  scale_x_continuous(breaks=seq(30,48,1)) +
+  scale_y_continuous(limits = c(0, 15), breaks = seq(0,15,5)) +
+  coord_cartesian(ylim = c(0, 15)) +
+  labs(
+    x = "Age (months)", 
+    y = "Fitted\n Complexity\n Score",
+    linetype = "Maternal \nEducation") +
+  theme(axis.title.y = element_text(angle = 0, vjust = 0.5, size = 14)) +
+  theme(legend.text = element_text(size = 16))+
+  theme(legend.title = element_text(size = 18))+
+  theme(text = element_text(size = 16))
+
+ggsave("G:/Shared drives/Lang Learning Lab Management/Staff Personal/Active Staff Personal/VMarchman/CDI/Spanish CDI III/Data 2019/Analyses 2023/GAMLSS_complexity_momed.jpg", height = 8, width = 11, units = "in", dpi = 300)
+
+
+```
+
+#Descriptives of Pronunciation and Conceptos Generales
+```{r}
+
+# pronunciation
+# Note: Yes = 0 ("my child is difficult to understand"); No = 1 ("my child is not difficult to understand)
+
+table(SCDI_III$Pronunc)
+
+pronounce_table <- proportions(table(SCDI_III$agegroup3,SCDI_III$Pronunc), 1)
+round(pronounce_table, 2)
+
+pronounce_table_all <- proportions(table(SCDI_III$Pronunc))
+round(pronounce_table_all, 2)
+
+# conceptos generales - mean of number of yes answers to 3 questions (0-3 possible)
+
+SCDI_III %>% 
+  count(conceptsum)
+
+SCDI_III %>% group_by(agegroup3) %>%
+  summarise(mean_conceptos = mean(conceptsum, na.rm = T),
+            sd_conceptos = sd(conceptsum, na.rm = T))
+
+SCDI_III %>%
+  summarise(mean_conceptos = mean(conceptsum, na.rm = T),
+            sd_conceptos = sd(conceptsum, na.rm = T))
+
+```
